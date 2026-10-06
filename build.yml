@@ -1,0 +1,562 @@
+name: Build Adila APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Generate Adila project
+        run: |
+          set -e
+          :
+          cat > settings.gradle.kts <<'ADILA_EOF_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Adila"
+          include(":app")
+          ADILA_EOF_0
+          :
+          cat > build.gradle.kts <<'ADILA_EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          ADILA_EOF_1
+          :
+          cat > gradle.properties <<'ADILA_EOF_2'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          kotlin.code.style=official
+          ADILA_EOF_2
+          mkdir -p app
+          cat > app/build.gradle.kts <<'ADILA_EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.adila.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.adila.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          ADILA_EOF_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'ADILA_EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.CALL_PHONE"/>
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+              <queries>
+                  <intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>
+                  <intent><action android:name="android.speech.RecognitionService"/></intent>
+                  <intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>
+              </queries>
+              <application android:label="Adila" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          ADILA_EOF_4
+          mkdir -p app/src/main/java/com/adila/app
+          cat > app/src/main/java/com/adila/app/MainActivity.kt <<'ADILA_EOF_5'
+          package com.adila.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.camera2.CameraManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.AlarmClock
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.Switch
+          import android.widget.TextView
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.Calendar
+          import java.util.Locale
+
+          class MainActivity : Activity(), TextToSpeech.OnInitListener {
+              private lateinit var pr: SharedPreferences
+              private lateinit var chat: LinearLayout
+              private lateinit var scroll: ScrollView
+              private lateinit var input: EditText
+              private lateinit var mic: Button
+              private lateinit var statusTv: TextView
+              private lateinit var main: LinearLayout
+              private lateinit var settings: ScrollView
+              private val fields = ArrayList<Pair<String, EditText>>()
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              private var sr: SpeechRecognizer? = null
+              private var listening = false
+              private var speaking = false
+              private var wakeOn = false
+              private var awake = false
+              private val hist = ArrayList<Pair<String, String>>()
+              private val BG = Color.parseColor("#0A1030")
+              private val RED = Color.parseColor("#E5202F")
+              private val BLUE = Color.parseColor("#2F6BFF")
+              private val CARD = Color.parseColor("#121C45")
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  pr = getSharedPreferences("adila", MODE_PRIVATE)
+                  tts = TextToSpeech(this, this)
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(BG)
+                  buildMain()
+                  buildSettings()
+                  root.addView(main)
+                  root.addView(settings)
+                  settings.visibility = View.GONE
+                  setContentView(root)
+              }
+
+              private fun buildMain() {
+                  main = LinearLayout(this)
+                  main.orientation = LinearLayout.VERTICAL
+                  main.setPadding(dp(14), dp(36), dp(14), dp(10))
+                  val head = LinearLayout(this)
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  val title = TextView(this)
+                  title.text = "Adila"
+                  title.textSize = 30f
+                  title.setTextColor(Color.WHITE)
+                  title.setTypeface(null, Typeface.BOLD_ITALIC)
+                  head.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  val gear = Button(this)
+                  gear.text = "Settings"
+                  gear.setOnClickListener { showSettings(true) }
+                  head.addView(gear)
+                  main.addView(head)
+                  statusTv = TextView(this)
+                  statusTv.setTextColor(Color.parseColor("#9FB0E0"))
+                  statusTv.text = "Ready / Taiyaar"
+                  main.addView(statusTv)
+                  scroll = ScrollView(this)
+                  chat = LinearLayout(this)
+                  chat.orientation = LinearLayout.VERTICAL
+                  scroll.addView(chat)
+                  main.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                  val bar = LinearLayout(this)
+                  bar.gravity = Gravity.CENTER_VERTICAL
+                  input = EditText(this)
+                  input.hint = "Type or tap mic / Likho ya mic dabao"
+                  input.setTextColor(Color.WHITE)
+                  input.setHintTextColor(Color.GRAY)
+                  bar.addView(input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  val send = Button(this)
+                  send.text = "Send"
+                  send.setOnClickListener { val t = input.text.toString(); input.setText(""); ask(t) }
+                  bar.addView(send)
+                  mic = Button(this)
+                  mic.text = "Mic"
+                  mic.setOnClickListener {
+                      if (listening || wakeOn) stopAll() else { wakeOn = pr.getBoolean("wake", false); startListening() }
+                  }
+                  bar.addView(mic)
+                  main.addView(bar)
+              }
+
+              private fun buildSettings() {
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(36), dp(16), dp(24))
+                  fun label(t: String) {
+                      val v = TextView(this)
+                      v.text = t
+                      v.setTextColor(Color.parseColor("#9FB0E0"))
+                      v.setPadding(0, dp(14), 0, dp(2))
+                      col.addView(v)
+                  }
+                  fun fld(l: String, k: String, d: String) {
+                      label(l)
+                      val e = EditText(this)
+                      e.setText(pr.getString(k, d))
+                      e.setTextColor(Color.WHITE)
+                      e.setSingleLine(true)
+                      col.addView(e)
+                      fields.add(Pair(k, e))
+                  }
+                  fun sw(l: String, k: String, d: Boolean) {
+                      val s = Switch(this)
+                      s.text = l
+                      s.setTextColor(Color.WHITE)
+                      s.isChecked = pr.getBoolean(k, d)
+                      s.setPadding(0, dp(10), 0, dp(10))
+                      s.setOnCheckedChangeListener { _, c ->
+                          pr.edit().putBoolean(k, c).apply()
+                          if (k == "sw_call" && c && checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED)
+                              requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), 2)
+                      }
+                      col.addView(s)
+                  }
+                  val h = TextView(this)
+                  h.text = "Settings"
+                  h.textSize = 26f
+                  h.setTextColor(Color.WHITE)
+                  col.addView(h)
+                  label("Get a FREE key at console.groq.com (or aistudio.google.com). Free key yahan se lo, phir neeche paste karo.")
+                  fld("AI API key", "key", "")
+                  fld("AI base URL (Groq default)", "base", "https://api.groq.com/openai/v1")
+                  fld("AI model", "model", "llama-3.3-70b-versatile")
+                  fld("Voice language (hi-IN, en-IN, ur-PK)", "lang", "hi-IN")
+                  label("Permissions / Ijazat (OFF = Adila never does it)")
+                  sw("Speak replies / Bolkar jawab", "speak", true)
+                  sw("Greeting on start / Salaam", "greet", true)
+                  sw("Keep listening for 'Adila' while app is open", "wake", false)
+                  sw("Open apps, search, maps, YouTube", "sw_apps", true)
+                  sw("Calls and WhatsApp", "sw_call", true)
+                  sw("SMS", "sw_sms", true)
+                  sw("Alarm and timer", "sw_alarm", true)
+                  sw("Flashlight", "sw_flash", true)
+                  sw("Notes", "sw_notes", true)
+                  val back = Button(this)
+                  back.text = "Save and go back / Save karo"
+                  back.setOnClickListener { showSettings(false) }
+                  col.addView(back)
+                  settings = ScrollView(this)
+                  settings.addView(col)
+              }
+
+              private fun showSettings(on: Boolean) {
+                  if (!on) for (f in fields) pr.edit().putString(f.first, f.second.text.toString().trim()).apply()
+                  settings.visibility = if (on) View.VISIBLE else View.GONE
+                  main.visibility = if (on) View.GONE else View.VISIBLE
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  if (settings.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
+              }
+
+              private fun bubble(t: String, user: Boolean): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = 16f
+                  v.setTextColor(Color.WHITE)
+                  val g = GradientDrawable()
+                  g.cornerRadius = dp(16).toFloat()
+                  g.setColor(if (user) RED else CARD)
+                  v.background = g
+                  v.setPadding(dp(12), dp(8), dp(12), dp(8))
+                  val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                  lp.gravity = if (user) Gravity.END else Gravity.START
+                  lp.setMargins(0, dp(4), 0, dp(4))
+                  chat.addView(v, lp)
+                  scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+                  return v
+              }
+
+              private fun status(t: String) { statusTv.text = t }
+              private fun resetMic() { mic.text = "Mic"; status("Ready / Taiyaar") }
+
+              // ---------- voice ----------
+              override fun onInit(s: Int) {
+                  if (s != TextToSpeech.SUCCESS) return
+                  val r = tts!!.setLanguage(Locale("hi", "IN"))
+                  if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts!!.setLanguage(Locale("en", "IN"))
+                  tts!!.setPitch(0.75f)
+                  tts!!.setSpeechRate(0.95f)
+                  tts!!.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) { speaking = true }
+                      override fun onDone(id: String?) { speaking = false; runOnUiThread { resume() } }
+                      @Deprecated("Deprecated in Java")
+                      override fun onError(id: String?) { speaking = false }
+                  })
+                  ttsReady = true
+                  if (pr.getBoolean("greet", true)) {
+                      val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                      val g = if (h < 12) "Good morning" else if (h < 17) "Good afternoon" else "Good evening"
+                      say("Assalamualaikum! $g. Main Adila hoon. Aaj main aapki kya madad karun?")
+                  }
+                  if (pr.getString("key", "").isNullOrBlank()) bubble("First, open Settings and paste your free AI key. / Pehle Settings mein free AI key daalo.", false)
+              }
+
+              private fun speak(t: String): Boolean {
+                  if (!pr.getBoolean("speak", true) || !ttsReady) return false
+                  sr?.cancel()
+                  listening = false
+                  tts!!.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u" + System.nanoTime())
+                  return true
+              }
+
+              private fun say(t: String) { bubble(t, false); if (!speak(t)) resume() }
+
+              private fun startListening() {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1); return
+                  }
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      bubble("Voice recognition is not available on this phone. Install/enable Google app. / Is phone mein awaaz pehchanne wala service nahi hai.", false); return
+                  }
+                  if (sr == null) { sr = SpeechRecognizer.createSpeechRecognizer(this); sr!!.setRecognitionListener(listener) }
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, pr.getString("lang", "hi-IN"))
+                  i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  listening = true
+                  mic.text = "Stop"
+                  sr!!.startListening(i)
+              }
+
+              private val listener = object : RecognitionListener {
+                  override fun onReadyForSpeech(b: Bundle?) { status("Listening... / Sun raha hoon") }
+                  override fun onBeginningOfSpeech() {}
+                  override fun onRmsChanged(v: Float) {}
+                  override fun onBufferReceived(b: ByteArray?) {}
+                  override fun onEndOfSpeech() {}
+                  override fun onEvent(a: Int, b: Bundle?) {}
+                  override fun onPartialResults(b: Bundle?) {
+                      val t = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                      if (!t.isNullOrBlank()) status("Heard: $t")
+                  }
+                  override fun onResults(b: Bundle?) {
+                      listening = false
+                      heard(b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: "")
+                  }
+                  override fun onError(e: Int) {
+                      if (e == SpeechRecognizer.ERROR_CLIENT) return
+                      listening = false
+                      val soft = e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                      if (wakeOn && soft) Handler(Looper.getMainLooper()).postDelayed({ if (wakeOn && !speaking && !listening) startListening() }, 500)
+                      else { wakeOn = false; resetMic(); if (!soft) status("Voice stopped (code $e). Tap Mic or type.") }
+                  }
+              }
+
+              private fun heard(t: String) {
+                  if (t.isBlank()) { resume(); return }
+                  if (pr.getBoolean("wake", false)) {
+                      val re = Regex("adila|adeela|aadila|आदिला|अदीला|अदिला", RegexOption.IGNORE_CASE)
+                      if (re.containsMatchIn(t) || awake) {
+                          awake = false
+                          val rest = t.replace(re, "").trim().trimStart(',', '.', ' ')
+                          if (rest.length > 2) ask(rest) else { awake = true; say("Ji, boliye.") }
+                      } else resume()
+                  } else { resetMic(); ask(t) }
+              }
+
+              private fun resume() {
+                  if (wakeOn && !listening && !speaking) startListening() else if (!wakeOn && !listening) resetMic()
+              }
+
+              private fun stopAll() {
+                  wakeOn = false; awake = false; listening = false
+                  sr?.cancel(); tts?.stop(); speaking = false
+                  resetMic()
+              }
+
+              override fun onRequestPermissionsResult(rc: Int, p: Array<out String>, g: IntArray) {
+                  super.onRequestPermissionsResult(rc, p, g)
+                  if (rc == 1) {
+                      if (g.isNotEmpty() && g[0] == PackageManager.PERMISSION_GRANTED) { wakeOn = pr.getBoolean("wake", false); startListening() }
+                      else bubble("Mic permission denied. You can still type. / Mic ki ijazat nahi mili, likhkar bol sakte ho.", false)
+                  }
+              }
+
+              override fun onDestroy() { sr?.destroy(); tts?.shutdown(); super.onDestroy() }
+
+              // ---------- AI ----------
+              private fun sys(): String = """
+          You are Adila, a friendly, smart voice assistant with a male voice, like ChatGPT. Answer ANY question helpfully.
+          Reply in the user's language (Hinglish in Roman letters if they wrote Hinglish, English if English). Use masculine forms (raha hoon, karunga).
+          Keep replies short and spoken-friendly: 1 to 4 sentences, no markdown.
+          You control the user's Android phone. Respond ONLY with a JSON object: {"reply":"...","action":"none","arg":"","arg2":""}
+          Allowed action values:
+          open_app (arg = app name), call (arg = phone number), sms (arg = number, arg2 = message), whatsapp (arg = number with country code, arg2 = message),
+          alarm (arg = HH:MM 24h, arg2 = label), timer (arg = seconds), search (arg = query), youtube (arg = query), maps (arg = place),
+          flashlight (arg = on or off), note (arg = text), read_notes, none.
+          Use none for normal questions. You cannot see live weather, news or prices; say so honestly. Never claim you did something the action list cannot do.
+          Current time: ${java.util.Date()}
+          """.trimIndent()
+
+              private fun ask(t: String) {
+                  if (t.isBlank()) return
+                  bubble(t, true)
+                  if (pr.getString("key", "").isNullOrBlank()) { say("Please add your AI key in Settings. / Settings mein AI key daalo."); return }
+                  val thinking = bubble("...", false)
+                  status("Thinking... / Soch raha hoon...")
+                  Thread {
+                      try {
+                          val (reply, action, args) = callAi(t)
+                          runOnUiThread {
+                              thinking.text = reply
+                              val res = if (action != "none") act(action, args[0], args[1]) else ""
+                              if (res.isNotEmpty()) thinking.text = reply + "\n(" + res + ")"
+                              status("Ready / Taiyaar")
+                              if (!speak(if (res.isNotEmpty() && res.startsWith("OFF")) reply + ". " + res else reply)) resume()
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread { thinking.text = "Error: " + e.message; status("Ready / Taiyaar"); resume() }
+                      }
+                  }.start()
+              }
+
+              private fun callAi(t: String): Triple<String, String, List<String>> {
+                  val base = pr.getString("base", "https://api.groq.com/openai/v1")!!.trimEnd('/')
+                  val model = pr.getString("model", "llama-3.3-70b-versatile")!!
+                  val msgs = JSONArray()
+                  msgs.put(JSONObject().put("role", "system").put("content", sys()))
+                  for (h in hist.takeLast(10)) msgs.put(JSONObject().put("role", h.first).put("content", h.second))
+                  msgs.put(JSONObject().put("role", "user").put("content", t))
+                  val body = JSONObject().put("model", model).put("messages", msgs).put("temperature", 0.7)
+                      .put("response_format", JSONObject().put("type", "json_object"))
+                  val c = URL("$base/chat/completions").openConnection() as HttpURLConnection
+                  c.requestMethod = "POST"
+                  c.connectTimeout = 15000
+                  c.readTimeout = 60000
+                  c.doOutput = true
+                  c.setRequestProperty("Content-Type", "application/json")
+                  c.setRequestProperty("Authorization", "Bearer " + pr.getString("key", ""))
+                  c.outputStream.use { it.write(body.toString().toByteArray()) }
+                  val code = c.responseCode
+                  val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().use { it.readText() }
+                  if (code !in 200..299) throw Exception("AI error $code: " + txt.take(200))
+                  val content = JSONObject(txt).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+                  var reply = content
+                  var action = "none"
+                  var a1 = ""
+                  var a2 = ""
+                  try {
+                      val j = JSONObject(content)
+                      reply = j.optString("reply", content)
+                      action = j.optString("action", "none")
+                      a1 = j.optString("arg", "")
+                      a2 = j.optString("arg2", "")
+                  } catch (e: Exception) {}
+                  hist.add(Pair("user", t))
+                  hist.add(Pair("assistant", reply))
+                  return Triple(reply, action, listOf(a1, a2))
+              }
+
+              // ---------- phone actions ----------
+              private fun on(k: String) = pr.getBoolean(k, true)
+              private fun off(n: String) = "OFF: $n permission is off in Settings"
+              private fun view(u: String) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+              private fun enc(s: String) = Uri.encode(s)
+
+              private fun act(a: String, x: String, y: String): String {
+                  try {
+                      when (a) {
+                          "open_app" -> {
+                              if (!on("sw_apps")) return off("Apps")
+                              val pm = packageManager
+                              val li = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+                              val m = li.firstOrNull { it.loadLabel(pm).toString().lowercase().contains(x.lowercase()) } ?: return "App '$x' not found"
+                              val li2 = pm.getLaunchIntentForPackage(m.activityInfo.packageName) ?: return "Cannot open $x"
+                              startActivity(li2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          }
+                          "search" -> { if (!on("sw_apps")) return off("Apps"); view("https://www.google.com/search?q=" + enc(x)) }
+                          "youtube" -> { if (!on("sw_apps")) return off("Apps"); view("https://www.youtube.com/results?search_query=" + enc(x)) }
+                          "maps" -> { if (!on("sw_apps")) return off("Apps"); view("geo:0,0?q=" + enc(x)) }
+                          "call" -> {
+                              if (!on("sw_call")) return off("Calls")
+                              val n = x.filter { it.isDigit() || it == '+' }
+                              if (n.length < 3) return "Number missing"
+                              val granted = checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+                              startActivity(Intent(if (granted) Intent.ACTION_CALL else Intent.ACTION_DIAL, Uri.parse("tel:$n")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          }
+                          "sms" -> {
+                              if (!on("sw_sms")) return off("SMS")
+                              startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + x.filter { it.isDigit() || it == '+' })).putExtra("sms_body", y).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          }
+                          "whatsapp" -> {
+                              if (!on("sw_call")) return off("Calls and WhatsApp")
+                              view("https://wa.me/" + x.filter { it.isDigit() } + "?text=" + enc(y))
+                          }
+                          "alarm" -> {
+                              if (!on("sw_alarm")) return off("Alarm")
+                              val parts = x.split(":")
+                              val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                              i.putExtra(AlarmClock.EXTRA_HOUR, parts[0].trim().toInt())
+                              i.putExtra(AlarmClock.EXTRA_MINUTES, parts.getOrElse(1) { "0" }.trim().toInt())
+                              i.putExtra(AlarmClock.EXTRA_MESSAGE, y)
+                              i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                              startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          }
+                          "timer" -> {
+                              if (!on("sw_alarm")) return off("Timer")
+                              val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                              i.putExtra(AlarmClock.EXTRA_LENGTH, x.trim().toDouble().toInt())
+                              i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                              startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          }
+                          "flashlight" -> {
+                              if (!on("sw_flash")) return off("Flashlight")
+                              val cm = getSystemService(CAMERA_SERVICE) as CameraManager
+                              cm.setTorchMode(cm.cameraIdList[0], x.lowercase() == "on")
+                          }
+                          "note" -> {
+                              if (!on("sw_notes")) return off("Notes")
+                              val arr = JSONArray(pr.getString("notes", "[]"))
+                              arr.put(x)
+                              pr.edit().putString("notes", arr.toString()).apply()
+                          }
+                          "read_notes" -> {
+                              if (!on("sw_notes")) return off("Notes")
+                              val arr = JSONArray(pr.getString("notes", "[]"))
+                              val sb = StringBuilder()
+                              for (i in 0 until arr.length()) sb.append(i + 1).append(". ").append(arr.getString(i)).append("  ")
+                              return if (sb.isEmpty()) "No notes yet" else "Notes: $sb"
+                          }
+                      }
+                  } catch (e: Exception) { return "Could not do it: " + e.message }
+                  return ""
+              }
+          }
+          ADILA_EOF_5
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Adila-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
